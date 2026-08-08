@@ -41,17 +41,20 @@ def load_data():
     try:
         return fetch_data.collect(), None
     except Exception as exc:
+        detail = getattr(exc, "detail", None) or "%s: %s" % (type(exc).__name__, exc)
         path = os.path.join(HERE, "data.json")
         if os.path.exists(path):
             with open(path, encoding="utf-8") as f:
-                return json.load(f), str(exc)
+                return json.load(f), detail
         raise
 
 
 data, warn = load_data()
 
 if warn:
-    st.warning("원자료를 받지 못해 저장된 직전 자료를 보여줍니다. (%s)" % warn, icon="⚠️")
+    st.warning("원자료를 받지 못해 저장된 직전 자료를 보여줍니다.", icon="⚠️")
+    with st.expander("수집 실패 상세 (원문 포함)"):
+        st.code(warn, language="text")
 
 head, body = build_site.render(data)
 components.html(head + body, height=2400, scrolling=True)

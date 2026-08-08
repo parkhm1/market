@@ -55,45 +55,89 @@ def freesis_session():
     return s
 
 
-def freesis_series(s, obj_nm, start, end, value_col, extra=None):
-    """FreeSIS 일별 통계를 [(YYYYMMDD, float), ...] 오름차순으로 반환."""
-    dm = {
-        "tmpV1": "D",            # 자료주기 = 일
-        "tmpV45": start,         # 조회 시작일
-        "tmpV46": end,           # 조회 종료일
-        "tmpV40": "1",           # 금액 단위 나눔값 (1 = 원)
-        "OBJ_NM": obj_nm,
-    }
-    if extra:
-        dm.update(extra)
+class FreesisBadResponse(RuntimeError):
+    """응답이 JSON 이 아닐 때. 원문을 그대로 담아 원인을 눈으로 확인할 수 있게 한다."""
+
+    def __init__(self, obj_nm, span, resp, err):
+        body = resp.content or b""
+        self.detail = (
+            "FreeSIS %s (%s) 응답을 JSON 으로 읽지 못했습니다.\n"
+            "  오류      : %s\n"
+            "  status    : %s\n"
+            "  본문 길이 : %d bytes\n"
+            "  종류      : %s / 추정 인코딩 %s\n"
+            "  앞 240자  : %r\n"
+            "  끝 160자  : %r"
+            % (obj_nm, span, err, resp.status_code, len(body),
+               resp.headers.get("content-type"), resp.encoding,
+               body[:240], body[-160:])
+        )
+        super().__init__(self.detail)
+
+
+def _freesis_post(s, dm, span):
+    """FreeSIS 한 번 호출. 재시도하되, 마지막 실패는 원문을 담아 올린다."""
     headers = {
         "Content-Type": "application/json; charset=UTF-8",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9",
         "Referer": "https://freesis.kofia.or.kr/",
+        "X-Requested-With": "XMLHttpRequest",
     }
-    last_err = None
+    body = json.dumps({"dmSearch": dm}).encode("utf-8")
+    last = None
     for attempt in range(3):
         try:
-            r = s.post(FREESIS_URL, data=json.dumps({"dmSearch": dm}).encode("utf-8"),
-                       headers=headers, timeout=120)
-            payload = r.json()
-            break
-        except Exception as e:                     # HTML 오류 페이지 등
-            last_err = e
-            time.sleep(2 + 3 * attempt)
-    else:
-        raise RuntimeError("FreeSIS %s 조회 실패: %s" % (obj_nm, last_err))
+            r = s.post(FREESIS_URL, data=body, headers=headers, timeout=120)
+        except Exception as e:                       # 네트워크 자체 실패
+            last = RuntimeError("FreeSIS %s (%s) 요청 실패: %s"
+                                % (dm.get("OBJ_NM"), span, e))
+        else:
+            try:
+                return r.json()
+            except ValueError as e:                  # HTML 오류 페이지, 잘린 응답 등
+                last = FreesisBadResponse(dm.get("OBJ_NM"), span, r, e)
+        time.sleep(2 + 3 * attempt)
+    raise last
 
-    rows = payload.get("ds1") or []
-    out = []
-    for row in rows:
-        d = row.get("TMPV1")
-        v = row.get(value_col)
-        if not d or v is None:
-            continue
-        out.append((str(d), float(v)))
-    out.sort(key=lambda t: t[0])
+
+def _year_spans(start, end):
+    """조회구간을 1년 단위로 쪼갠다. 응답이 작을수록 잘림·시간초과에 강하다."""
+    s_d = date(int(start[:4]), int(start[4:6]), int(start[6:8]))
+    e_d = date(int(end[:4]), int(end[4:6]), int(end[6:8]))
+    spans, cur = [], s_d
+    while cur <= e_d:
+        nxt = min(date(cur.year + 1, cur.month, cur.day) - timedelta(days=1), e_d)
+        spans.append((cur.strftime("%Y%m%d"), nxt.strftime("%Y%m%d")))
+        cur = nxt + timedelta(days=1)
+    return spans
+
+
+def freesis_series(s, obj_nm, start, end, value_col, extra=None):
+    """FreeSIS 일별 통계를 [(YYYYMMDD, float), ...] 오름차순으로 반환."""
+    merged = {}
+    for c_start, c_end in _year_spans(start, end):
+        dm = {
+            "tmpV1": "D",            # 자료주기 = 일
+            "tmpV45": c_start,       # 조회 시작일
+            "tmpV46": c_end,         # 조회 종료일
+            "tmpV40": "1",           # 금액 단위 나눔값 (1 = 원)
+            "OBJ_NM": obj_nm,
+        }
+        if extra:
+            dm.update(extra)
+        payload = _freesis_post(s, dm, "%s~%s" % (c_start, c_end))
+        for row in payload.get("ds1") or []:
+            d, v = row.get("TMPV1"), row.get(value_col)
+            if not d or v is None:
+                continue
+            merged[str(d)] = float(v)
+
+    out = sorted(merged.items())
+    if not out:
+        raise RuntimeError("FreeSIS %s %s 결과가 비어 있습니다." % (obj_nm, value_col))
     log("  FreeSIS %s %-9s %4d건  (%s ~ %s)"
-        % (obj_nm, value_col, len(out), out[0][0] if out else "-", out[-1][0] if out else "-"))
+        % (obj_nm, value_col, len(out), out[0][0], out[-1][0]))
     return out
 
 
