@@ -173,7 +173,7 @@ def render(data):
     <p class="stale" id="stale" hidden></p>
   </header>
 
-  <div class="filters" role="group" aria-label="조회 기간">
+  <div class="filters" role="group" aria-label="차트 표시 설정">
     <span class="filters-label">조회 기간</span>
     <div class="segmented" id="rangeCtl">
       <button type="button" data-days="90">3개월</button>
@@ -181,7 +181,11 @@ def render(data):
       <button type="button" data-days="365">1년</button>
       <button type="button" data-days="0" class="is-on" aria-pressed="true">3년</button>
     </div>
+    <label class="check"><input type="checkbox" id="kospiCtl" checked> KOSPI 지수 겹쳐 보기</label>
+    <span class="zoomchip" id="zoomChip" hidden></span>
   </div>
+  <p class="hint">차트 위에서 <b>마우스 휠을 올리면 확대, 내리면 축소</b>됩니다(커서가 가리키는 날짜가 기준).
+    두 번 클릭하거나 <b>Esc</b>를 누르면 원래대로 돌아옵니다. 확대와 KOSPI 표시는 두 차트에 함께 적용됩니다.</p>
 
   <main class="stack" id="cards"></main>
 
@@ -315,6 +319,27 @@ body {
 .segmented button.is-on { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
 .segmented button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
 
+.check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--ink-2); cursor: pointer; min-height: 32px; }
+.check input { width: 15px; height: 15px; accent-color: var(--series-3); cursor: pointer; margin: 0; }
+.check:hover { color: var(--ink); }
+
+/* hidden 속성이 display 선언에 지지 않도록 명시한다 */
+.zoomchip[hidden] { display: none; }
+.zoomchip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12.5px; color: var(--ink-2); background: var(--wash);
+  border-radius: 7px; padding: 4px 4px 4px 11px; font-variant-numeric: tabular-nums;
+}
+.zoomchip button {
+  appearance: none; border: 0; background: none; cursor: pointer; font: inherit;
+  color: var(--ink-muted); line-height: 1; padding: 5px 7px; border-radius: 5px;
+}
+.zoomchip button:hover { color: var(--ink); background: var(--surface); }
+.zoomchip button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
+
+.hint { margin: -6px 0 18px; font-size: 12.5px; color: var(--ink-muted); }
+.hint b { color: var(--ink-2); font-weight: 600; }
+
 .stack { display: flex; flex-direction: column; gap: 26px; }
 
 .card {
@@ -359,6 +384,8 @@ body {
 .legend .dim { opacity: .72; }
 .caveat { margin: 8px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--ink-muted); max-width: 66ch; }
 .card.is-table .caveat { display: none; }
+/* KOSPI 를 끄면 오른쪽 축이 사라지므로 그에 딸린 범례·주의문도 함께 감춘다 */
+.card.no-kospi .caveat, .card.no-kospi .k-item { display: none; }
 .card.is-table .legend { display: none; }
 
 .plotwrap { position: relative; margin-top: 8px; }
@@ -409,7 +436,11 @@ JS = r"""
   "use strict";
   var P = JSON.parse(document.getElementById("payload").textContent);
   var charts = P.charts;
-  var rangeDays = 0;
+  var rangeDays = 0;            /* 기간 프리셋 (0 = 전체) */
+  var zoomWin = null;           /* 휠로 좁힌 창 {a, b} — 날짜 일련값 */
+  var showKospi = true;
+  var ZOOM_STEP = 0.78;         /* 휠 한 칸당 창 배율 */
+  var MIN_SPAN = 20;            /* 최소 창 너비(일). 영업일 14일쯤 */
 
   function fmt(v, d) { return v.toLocaleString("ko-KR", { minimumFractionDigits: d, maximumFractionDigits: d }); }
   function dateLabel(t) { return t.slice(0, 4) + "." + t.slice(4, 6) + "." + t.slice(6, 8); }
@@ -471,8 +502,9 @@ JS = r"""
           c.color + ')"></span>M2 미공표 구간 · 잠정') +
         '<span class="gap"></span><span class="swatch" style="background:var(--axis)"></span>' +
         '<span class="avgval">기간 평균</span>' +
-        '<span class="gap"></span><span class="swatch" style="background:var(--series-3)"></span>' +
-        'KOSPI 지수 <span class="dim">(오른쪽 축)</span>' +
+        '<span class="k-item"><span class="gap"></span>' +
+          '<span class="swatch" style="background:var(--series-3)"></span>' +
+          'KOSPI 지수 <span class="dim">(오른쪽 축)</span></span>' +
       '</div>' +
       '<p class="caveat">두 축의 높이를 맞추는 방식은 임의입니다. 선이 만나거나 교차하는 지점에는 ' +
         '의미가 없으니, 모양과 전환점만 비교해서 보세요.</p>' +
@@ -529,10 +561,71 @@ JS = r"""
     return out;
   }
 
+  /* 창(window) 계산 — 프리셋이 바깥 한계, 휠 확대는 그 안에서만 움직인다 */
+  function fullWindow() {
+    var lo = Infinity, hi = -Infinity;
+    charts.forEach(function (c) {
+      lo = Math.min(lo, ordOf(c.points[0][0]));
+      hi = Math.max(hi, ordOf(c.points[c.points.length - 1][0]));
+    });
+    return { a: lo, b: hi };
+  }
+  function baseWindow() {
+    var f = fullWindow();
+    return rangeDays ? { a: Math.max(f.a, f.b - rangeDays), b: f.b } : f;
+  }
+  function windowNow() { return zoomWin || baseWindow(); }
+
   function visible(c) {
-    if (!rangeDays) return c.points;
-    var end = ordOf(c.points[c.points.length - 1][0]);
-    return c.points.filter(function (p) { return ordOf(p[0]) >= end - rangeDays; });
+    var w = windowNow();
+    return c.points.filter(function (p) {
+      var o = ordOf(p[0]);
+      return o >= w.a && o <= w.b;
+    });
+  }
+
+  function ymdOf(ord) {
+    var d = new Date(Math.round(ord) * 86400000);
+    var p = function (n) { return (n < 10 ? "0" : "") + n; };
+    return "" + d.getUTCFullYear() + p(d.getUTCMonth() + 1) + p(d.getUTCDate());
+  }
+
+  /* 창을 적용한다. 어느 차트든 점이 5개 미만 남으면 무시한다. */
+  function setWindow(a, b) {
+    var base = baseWindow();
+    a = Math.max(base.a, a);
+    b = Math.min(base.b, b);
+    if (b - a < MIN_SPAN - 0.5) return false;
+    var ok = charts.every(function (c) {
+      return c.points.filter(function (p) {
+        var o = ordOf(p[0]); return o >= a && o <= b;
+      }).length >= 5;
+    });
+    if (!ok) return false;
+    zoomWin = (b - a >= base.b - base.a - 0.5) ? null : { a: a, b: b };
+    renderZoomChip();
+    drawAll();
+    return true;
+  }
+
+  function clearZoom() {
+    if (!zoomWin) return;
+    zoomWin = null;
+    renderZoomChip();
+    drawAll();
+  }
+
+  function renderZoomChip() {
+    var el = document.getElementById("zoomChip");
+    if (!zoomWin) { el.hidden = true; el.textContent = ""; return; }
+    el.hidden = false;
+    el.textContent = "확대 " + dateLabel(ymdOf(zoomWin.a)) + " ~ " + dateLabel(ymdOf(zoomWin.b)) + " ";
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = "✕";
+    b.setAttribute("aria-label", "확대 해제");
+    b.addEventListener("click", clearZoom);
+    el.appendChild(b);
   }
 
   function drawOne(c) {
@@ -545,10 +638,10 @@ JS = r"""
     var pts = visible(c);
     if (pts.length < 2) return;
 
-    /* KOSPI 지수가 있는 날짜 */
+    /* KOSPI 지수가 있는 날짜. 체크를 끄면 오른쪽 축과 함께 사라진다. */
     var kIdx = [];
     for (var q = 0; q < pts.length; q++) { if (pts[q][4] != null) kIdx.push(q); }
-    var hasK = kIdx.length >= 2;
+    var hasK = showKospi && kIdx.length >= 2;
 
     var W = Math.max(320, wrap.clientWidth || 640);
     var H = Math.max(250, Math.min(370, Math.round(W * 0.46)));
@@ -623,11 +716,14 @@ JS = r"""
     axisName(m.l, "left", c.title + " (%)", col);
     if (hasK) axisName(m.l + iw, "right", "KOSPI 지수", colK);
 
-    /* x 눈금 */
+    /* x 눈금 — 보이는 구간 길이에 맞춘다 (확대하면 월.일까지) */
+    var spanDays = o1 - o0;
+    var shortSpan = spanDays <= 120;
     var seen = {}, xt = [];
     pts.forEach(function (p, i) {
-      var key = rangeDays && rangeDays <= 365 ? p[0].slice(0, 6)
-                                             : p[0].slice(0, 4) + Math.ceil(+p[0].slice(4, 6) / 6);
+      var key = shortSpan ? p[0]
+              : (spanDays <= 400 ? p[0].slice(0, 6)
+                                 : p[0].slice(0, 4) + Math.ceil(+p[0].slice(4, 6) / 6));
       if (!seen[key]) { seen[key] = 1; xt.push(i); }
     });
     if (xt.length > 8) xt = xt.filter(function (_, k) { return k % Math.ceil(xt.length / 8) === 0; });
@@ -635,7 +731,8 @@ JS = r"""
       var t = pts[i][0];
       var tx = mk("text", { x: X(i), y: H - 9, "text-anchor": "middle", fill: "var(--ink-muted)",
         "font-size": 11, "font-variant-numeric": "tabular-nums" });
-      tx.textContent = t.slice(2, 4) + "." + t.slice(4, 6);
+      tx.textContent = shortSpan ? t.slice(4, 6) + "." + t.slice(6, 8)
+                                 : t.slice(2, 4) + "." + t.slice(4, 6);
       svg.appendChild(tx);
     });
 
@@ -746,9 +843,11 @@ JS = r"""
       tip.classList.remove("is-on");
     }
 
-    function nearest(clientX) {
+    function svgX(clientX) {
       var r = svg.getBoundingClientRect();
-      var x = (clientX - r.left) / r.width * W;
+      return (clientX - r.left) / r.width * W;
+    }
+    function indexAt(x) {
       var target = o0 + (x - m.l) / iw * (o1 - o0);
       var best = 0, bd = Infinity;
       for (var i = 0; i < pts.length; i++) {
@@ -757,8 +856,34 @@ JS = r"""
       }
       return best;
     }
-    svg.addEventListener("pointermove", function (e) { focus(nearest(e.clientX)); });
+
+    svg.addEventListener("pointermove", function (e) { focus(indexAt(svgX(e.clientX))); });
     svg.addEventListener("pointerleave", blur);
+    svg.addEventListener("dblclick", clearZoom);
+
+    /* 마우스 휠로 확대·축소. 커서 밑 날짜를 붙잡고 창을 좁히거나 넓힌다.
+       한계에 닿았으면 preventDefault 하지 않고 넘겨서 페이지 스크롤을 막지 않는다. */
+    svg.addEventListener("wheel", function (e) {
+      if (!e.deltaY) return;
+      var base = baseWindow(), cur = windowNow();
+      var spanNow = cur.b - cur.a;
+      var maxSpan = base.b - base.a;
+      var want = spanNow * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
+
+      /* 더 넓힐 수도, 더 좁힐 수도 없으면 휠은 페이지 몫이다 */
+      if (want >= spanNow && spanNow >= maxSpan - 0.5) return;
+      if (want <= spanNow && spanNow <= MIN_SPAN + 0.5) return;
+      e.preventDefault();
+
+      var span = Math.max(MIN_SPAN, Math.min(maxSpan, want));
+      var frac = Math.max(0, Math.min(1, (svgX(e.clientX) - m.l) / iw));
+      var anchor = cur.a + spanNow * frac;          /* 커서가 가리키는 날짜 */
+      var a = anchor - span * frac;
+      if (a < base.a) a = base.a;
+      if (a + span > base.b) a = base.b - span;
+      setWindow(a, a + span);
+    }, { passive: false });
+
     svg.addEventListener("focus", function () { focus(cur < 0 ? pts.length - 1 : cur); });
     svg.addEventListener("blur", blur);
     svg.addEventListener("keydown", function (e) {
@@ -767,8 +892,21 @@ JS = r"""
       else if (e.key === "ArrowRight") { focus(Math.min(pts.length - 1, (cur < 0 ? pts.length - 1 : cur) + step)); e.preventDefault(); }
       else if (e.key === "Home") { focus(0); e.preventDefault(); }
       else if (e.key === "End") { focus(pts.length - 1); e.preventDefault(); }
-      else if (e.key === "Escape") { blur(); }
+      /* 휠이 없어도 확대할 수 있게 — 지금 보이는 위치를 중심으로 좁히고 넓힌다 */
+      else if (e.key === "+" || e.key === "=") { zoomKey(ZOOM_STEP); e.preventDefault(); }
+      else if (e.key === "-" || e.key === "_") { zoomKey(1 / ZOOM_STEP); e.preventDefault(); }
+      /* 확대 중이면 Esc 로 해제, 아니면 십자선만 숨긴다 */
+      else if (e.key === "Escape") { if (zoomWin) { clearZoom(); } else { blur(); } }
     });
+
+    function zoomKey(factor) {
+      var base = baseWindow(), cur = windowNow();
+      var spanNow = cur.b - cur.a;
+      var span = Math.max(MIN_SPAN, Math.min(base.b - base.a, spanNow * factor));
+      var mid = cur.a + spanNow / 2;
+      var a = Math.max(base.a, Math.min(base.b - span, mid - span / 2));
+      setWindow(a, a + span);
+    }
 
     wrap.insertBefore(svg, tip);
   }
@@ -778,6 +916,8 @@ JS = r"""
   document.querySelectorAll("#rangeCtl button").forEach(function (b) {
     b.addEventListener("click", function () {
       rangeDays = +b.dataset.days;
+      zoom = null;                       /* 프리셋을 고르면 확대는 풀린다 */
+      renderZoomChip();
       document.querySelectorAll("#rangeCtl button").forEach(function (o) {
         var on = o === b;
         o.classList.toggle("is-on", on);
@@ -785,6 +925,14 @@ JS = r"""
       });
       drawAll();
     });
+  });
+
+  document.getElementById("kospiCtl").addEventListener("change", function () {
+    showKospi = this.checked;
+    charts.forEach(function (c) {
+      document.getElementById("card-" + c.id).classList.toggle("no-kospi", !showKospi);
+    });
+    drawAll();
   });
 
   drawAll();
