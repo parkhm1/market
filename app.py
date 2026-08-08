@@ -31,15 +31,20 @@ st.markdown("""
 
 
 @st.cache_data(ttl=3600, show_spinner="원자료를 받고 있습니다…")
-def load_data():
-    """원자료 수집. 실패하면 저장소에 커밋된 data.json 으로 대체한다."""
+def fetch_fresh():
+    """성공한 수집만 캐시한다. 예외가 나면 st.cache_data 는 캐시하지 않으므로 다음 접속에 다시 시도한다."""
     try:                                  # secrets.toml 이 없으면 예외가 난다
         if "ECOS_API_KEY" in st.secrets:
             os.environ["ECOS_API_KEY"] = str(st.secrets["ECOS_API_KEY"])
     except Exception:
         pass                              # 인증키 없이 공개 sample 키로 진행
+    return fetch_data.collect()
+
+
+def load_data():
+    """원자료 수집. 실패하면 저장소에 커밋된 data.json 으로 대체한다."""
     try:
-        return fetch_data.collect(), None
+        return fetch_fresh(), None
     except Exception as exc:
         detail = getattr(exc, "detail", None) or "%s: %s" % (type(exc).__name__, exc)
         path = os.path.join(HERE, "data.json")
@@ -59,6 +64,11 @@ if warn:
 head, body = build_site.render(data)
 components.html(head + body, height=2400, scrolling=True)
 
-if st.button("지금 다시 받기", help="캐시를 비우고 원자료를 다시 받습니다"):
-    load_data.clear()
-    st.rerun()
+col1, col2 = st.columns([1, 4])
+with col1:
+    if st.button("지금 다시 받기", help="캐시를 비우고 원자료를 다시 받습니다"):
+        fetch_fresh.clear()
+        st.rerun()
+with col2:
+    st.caption("수집 코드 %s · 자료 %s"
+               % (fetch_data.VERSION, data.get("fetched_at", "?")[:16].replace("T", " ")))

@@ -42,6 +42,10 @@ FREESIS_HOME = "https://freesis.kofia.or.kr/stat/main.do"
 MONEY_DIV = 100000000          # 억원
 SHARE_DIV = 1000               # 천주 (쓰지 않는 컬럼이지만 같이 짧게 받는다)
 
+# 배포된 코드가 어느 버전인지 화면에서 바로 확인하기 위한 표시.
+# 수집 로직을 바꿀 때마다 올린다.
+VERSION = "2026-08-08c (억원 단위 + 마스킹 복원)"
+
 def ecos_key():
     """ECOS 인증키: 환경변수 ECOS_API_KEY 가 있으면 사용, 없으면 공개 sample 키(1회 10건 제한).
     호출 시점에 읽는다 — Streamlit 처럼 import 이후에 키를 넣는 경우가 있다."""
@@ -70,13 +74,15 @@ class FreesisBadResponse(RuntimeError):
         body = resp.content or b""
         self.detail = (
             "FreeSIS %s (%s) 응답을 JSON 으로 읽지 못했습니다.\n"
+            "  코드버전  : %s\n"
+            "  금액단위  : 1/%d 로 요청 (tmpV40)\n"
             "  오류      : %s\n"
             "  status    : %s\n"
             "  본문 길이 : %d bytes\n"
             "  종류      : %s / 추정 인코딩 %s\n"
             "  앞 240자  : %r\n"
             "  끝 160자  : %r"
-            % (obj_nm, span, err, resp.status_code, len(body),
+            % (obj_nm, span, VERSION, MONEY_DIV, err, resp.status_code, len(body),
                resp.headers.get("content-type"), resp.encoding,
                body[:240], body[-160:])
         )
