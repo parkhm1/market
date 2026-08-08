@@ -57,7 +57,9 @@ def build_series(data):
     credit = dict(d["credit"])
     kospi = dict(d["mktcap_kospi"])
     kosdaq = dict(d["mktcap_kosdaq"])
+    kidx = dict(d.get("kospi_index") or [])
 
+    # 각 점: [일자, 비율%, 분자(조), 분모(조), KOSPI지수]
     # 지표 1 --------------------------------------------------------------
     dates1 = sorted(set(deposit) & set(kospi) & set(kosdaq))
     s1 = []
@@ -66,7 +68,8 @@ def build_series(data):
         if den <= 0:
             continue
         s1.append([t, round(deposit[t] / den * 100, 4),
-                   round(deposit[t] / JO, 2), round(den / JO, 1)])
+                   round(deposit[t] / JO, 2), round(den / JO, 1),
+                   kidx.get(t)])
 
     # 지표 2 --------------------------------------------------------------
     dates2 = sorted(credit)
@@ -80,7 +83,8 @@ def build_series(data):
         if prov[idx] and first_prov is None:
             first_prov = len(s2)
         s2.append([t, round(credit[t] / m2v * 100, 4),
-                   round(credit[t] / JO, 2), round(m2v / JO, 0)])
+                   round(credit[t] / JO, 2), round(m2v / JO, 0),
+                   kidx.get(t)])
 
     last_m2_ym = max(ym for ym, _ in data["monthly"]["m2"])
     return s1, s2, first_prov, last_m2_ym
@@ -226,6 +230,7 @@ CSS = r"""
   --hairline:     rgba(11,11,11,0.10);
   --series-1:     #2a78d6;
   --series-2:     #eb6834;
+  --series-3:     #1baf7a;
   --up:           #006300;
   --down:         #d03b3b;
   --wash:         rgba(11,11,11,0.04);
@@ -243,6 +248,7 @@ CSS = r"""
     --hairline:   rgba(255,255,255,0.10);
     --series-1:   #3987e5;
     --series-2:   #d95926;
+    --series-3:   #199e70;
     --up:         #0ca30c;
     --down:       #e66767;
     --wash:       rgba(255,255,255,0.06);
@@ -260,6 +266,7 @@ CSS = r"""
   --hairline:   rgba(255,255,255,0.10);
   --series-1:   #3987e5;
   --series-2:   #d95926;
+  --series-3:   #199e70;
   --up:         #0ca30c;
   --down:       #e66767;
   --wash:       rgba(255,255,255,0.06);
@@ -349,6 +356,9 @@ body {
 .legend .swatch { display: inline-block; width: 15px; height: 2px; border-radius: 1px; }
 .legend .swatch.dashed { height: 0; background: none; }
 .legend .gap { width: 8px; }
+.legend .dim { opacity: .72; }
+.caveat { margin: 8px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--ink-muted); max-width: 66ch; }
+.card.is-table .caveat { display: none; }
 .card.is-table .legend { display: none; }
 
 .plotwrap { position: relative; margin-top: 8px; }
@@ -461,7 +471,11 @@ JS = r"""
           c.color + ')"></span>M2 미공표 구간 · 잠정') +
         '<span class="gap"></span><span class="swatch" style="background:var(--axis)"></span>' +
         '<span class="avgval">기간 평균</span>' +
+        '<span class="gap"></span><span class="swatch" style="background:var(--series-3)"></span>' +
+        'KOSPI 지수 <span class="dim">(오른쪽 축)</span>' +
       '</div>' +
+      '<p class="caveat">두 축의 높이를 맞추는 방식은 임의입니다. 선이 만나거나 교차하는 지점에는 ' +
+        '의미가 없으니, 모양과 전환점만 비교해서 보세요.</p>' +
       '<div class="plotwrap"><div class="tip" role="status" aria-live="polite"></div></div>' +
       '<div class="tablewrap"></div>';
     cards.appendChild(el);
@@ -484,7 +498,8 @@ JS = r"""
   function buildTable(c, host) {
     var rows = c.points.slice().reverse();
     var html = '<table><thead><tr><th scope="col">일자</th><th scope="col">비율 (%)</th>' +
-      '<th scope="col">' + c.numLabel + ' (조원)</th><th scope="col">' + c.denLabel + ' (조원)</th></tr></thead><tbody>';
+      '<th scope="col">' + c.numLabel + ' (조원)</th><th scope="col">' + c.denLabel + ' (조원)</th>' +
+      '<th scope="col">KOSPI 지수</th></tr></thead><tbody>';
     var provStart = c.provFrom == null ? Infinity : c.provFrom;
     for (var i = 0; i < rows.length; i++) {
       var p = rows[i];
@@ -493,7 +508,8 @@ JS = r"""
         dateLabel(p[0]) + '</th>' +
         '<td' + (isProv ? ' class="prov"' : '') + '>' + fmt(p[1], c.digits) + (isProv ? ' *' : '') + '</td>' +
         '<td>' + fmt(p[2], p[2] < 100 ? 2 : 1) + '</td>' +
-        '<td>' + fmt(p[3], 0) + '</td></tr>';
+        '<td>' + fmt(p[3], 0) + '</td>' +
+        '<td>' + (p[4] == null ? '–' : fmt(p[4], 2)) + '</td></tr>';
     }
     html += '</tbody></table>';
     if (c.provFrom != null) html += '<p class="tablenote">* M2 미공표 구간 · 잠정 계산</p>';
@@ -528,58 +544,105 @@ JS = r"""
 
     var pts = visible(c);
     if (pts.length < 2) return;
+
+    /* KOSPI 지수가 있는 날짜 */
+    var kIdx = [];
+    for (var q = 0; q < pts.length; q++) { if (pts[q][4] != null) kIdx.push(q); }
+    var hasK = kIdx.length >= 2;
+
     var W = Math.max(320, wrap.clientWidth || 640);
-    var H = Math.max(210, Math.min(330, Math.round(W * 0.42)));
-    var m = { t: 14, r: 16, b: 30, l: 50 };
+    var H = Math.max(250, Math.min(370, Math.round(W * 0.46)));
+    var m = { t: 26, r: hasK ? 58 : 16, b: 28, l: 52 };
     var iw = W - m.l - m.r, ih = H - m.t - m.b;
     var col = "var(--series-" + c.color + ")";
+    var colK = "var(--series-3)";
 
     var vals = pts.map(function (p) { return p[1]; });
-    var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
-    var pad = (hi - lo) * 0.14 || Math.abs(hi) * 0.05 || 1;
-    var y0 = lo - pad, y1 = hi + pad;
     var o0 = ordOf(pts[0][0]), o1 = ordOf(pts[pts.length - 1][0]);
-
     var X = function (i) { return m.l + (ordOf(pts[i][0]) - o0) / (o1 - o0) * iw; };
-    var Y = function (v) { return m.t + (y1 - v) / (y1 - y0) * ih; };
+
+    /* 값 범위에 여유를 둔 스케일. 두 계열이 같은 그림에 겹치므로 축은 둘이다. */
+    function scaleOf(arr) {
+      var lo = Math.min.apply(null, arr), hi = Math.max.apply(null, arr);
+      var pad = (hi - lo) * 0.14 || Math.abs(hi) * 0.05 || 1;
+      var a = lo - pad, b = hi + pad;
+      return { lo: a, hi: b, y: function (v) { return m.t + (b - v) / (b - a) * ih; } };
+    }
+    var A = scaleOf(vals);
+    var kvals = kIdx.map(function (i) { return pts[i][4]; });
+    var B = hasK ? scaleOf(kvals) : null;
 
     var svg = mk("svg", {
       viewBox: "0 0 " + W + " " + H, width: W, height: H, role: "img", tabindex: "0",
-      "aria-label": c.title + " 추이. " + dateLabel(pts[0][0]) + "부터 " + dateLabel(pts[pts.length - 1][0]) +
-        "까지, 최근값 " + fmt(c.stats.cur, c.digits) + "%."
+      "aria-label": c.title + " 추이와 KOSPI 지수를 겹쳐 그린 차트. " + dateLabel(pts[0][0]) + "부터 " +
+        dateLabel(pts[pts.length - 1][0]) + "까지. 최근값 " + fmt(c.stats.cur, c.digits) + "%" +
+        (hasK ? ", 같은 날 KOSPI " + fmt(kvals[kvals.length - 1], 2) +
+                ". 두 축의 높이 맞춤은 임의이므로 선이 만나는 지점에는 의미가 없습니다." : ".")
     });
 
-    /* y 그리드 + 눈금 */
-    niceTicks(y0, y1, 5).forEach(function (v) {
-      var y = Y(v);
-      svg.appendChild(mk("line", { x1: m.l, x2: m.l + iw, y1: y, y2: y, stroke: "var(--grid)", "stroke-width": 1 }));
+    /* 왼쪽 축 — 격자선은 이쪽만 그린다 (양쪽 다 그리면 격자가 두 겹이 된다) */
+    niceTicks(A.lo, A.hi, 5).forEach(function (v) {
+      var y = A.y(v);
+      svg.appendChild(mk("line", { x1: m.l, x2: m.l + iw, y1: y, y2: y,
+        stroke: "var(--grid)", "stroke-width": 1 }));
       var tx = mk("text", { x: m.l - 9, y: y + 4, "text-anchor": "end", fill: "var(--ink-muted)",
         "font-size": 11, "font-variant-numeric": "tabular-nums" });
       tx.textContent = fmt(v, c.digits);
       svg.appendChild(tx);
     });
 
+    /* 오른쪽 축 — KOSPI. 격자 대신 짧은 눈금선으로 축에 붙인다 */
+    if (hasK) {
+      niceTicks(B.lo, B.hi, 5).forEach(function (v) {
+        var y = B.y(v);
+        svg.appendChild(mk("line", { x1: m.l + iw, x2: m.l + iw + 4, y1: y, y2: y,
+          stroke: "var(--axis)", "stroke-width": 1 }));
+        var tx = mk("text", { x: m.l + iw + 8, y: y + 4, "text-anchor": "start", fill: "var(--ink-muted)",
+          "font-size": 11, "font-variant-numeric": "tabular-nums" });
+        tx.textContent = fmt(v, 0);
+        svg.appendChild(tx);
+      });
+    }
+    svg.appendChild(mk("line", { x1: m.l, x2: m.l + iw, y1: m.t + ih, y2: m.t + ih,
+      stroke: "var(--axis)", "stroke-width": 1 }));
+
+    /* 축 이름 — 어느 선이 어느 축인지 잇는다.
+       색은 앞뒤의 선 표식이 지고, 글자는 잉크 색을 쓴다.
+       표식은 각 축 바깐쪽(왼쪽 이름은 왼편, 오른쪽 이름은 오른편)에 두어 글자와 겹치지 않는다. */
+    function axisName(x, side, name, stroke) {
+      var sw = 13, pad = 5;
+      var lx = side === "right" ? x + 4 : x;
+      svg.appendChild(mk("line", { x1: lx, x2: lx + sw, y1: m.t - 13, y2: m.t - 13,
+        stroke: stroke, "stroke-width": 2, "stroke-linecap": "round" }));
+      var tx = mk("text", { y: m.t - 9, fill: "var(--ink-muted)", "font-size": 11,
+        x: side === "right" ? x : x + sw + pad,
+        "text-anchor": side === "right" ? "end" : "start" });
+      tx.textContent = name;
+      svg.appendChild(tx);
+    }
+    axisName(m.l, "left", c.title + " (%)", col);
+    if (hasK) axisName(m.l + iw, "right", "KOSPI 지수", colK);
+
     /* x 눈금 */
     var seen = {}, xt = [];
     pts.forEach(function (p, i) {
-      var key = rangeDays && rangeDays <= 182 ? p[0].slice(0, 6) :
-                (rangeDays && rangeDays <= 365 ? p[0].slice(0, 6) : p[0].slice(0, 4) + Math.ceil(+p[0].slice(4, 6) / 6));
+      var key = rangeDays && rangeDays <= 365 ? p[0].slice(0, 6)
+                                             : p[0].slice(0, 4) + Math.ceil(+p[0].slice(4, 6) / 6);
       if (!seen[key]) { seen[key] = 1; xt.push(i); }
     });
     if (xt.length > 8) xt = xt.filter(function (_, k) { return k % Math.ceil(xt.length / 8) === 0; });
     xt.forEach(function (i) {
       var t = pts[i][0];
-      var tx = mk("text", { x: X(i), y: H - 10, "text-anchor": "middle", fill: "var(--ink-muted)",
+      var tx = mk("text", { x: X(i), y: H - 9, "text-anchor": "middle", fill: "var(--ink-muted)",
         "font-size": 11, "font-variant-numeric": "tabular-nums" });
       tx.textContent = t.slice(2, 4) + "." + t.slice(4, 6);
       svg.appendChild(tx);
     });
-    svg.appendChild(mk("line", { x1: m.l, x2: m.l + iw, y1: m.t + ih, y2: m.t + ih, stroke: "var(--axis)", "stroke-width": 1 }));
 
-    /* 기간 평균 기준선 — 값은 범례와 타일이 말해준다 (차트 위 라벨은 계열과 부딪힌다) */
+    /* 기간 평균 기준선 — 값은 범례와 타일이 말해준다 */
     var avg = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
-    if (avg > y0 && avg < y1) {
-      svg.appendChild(mk("line", { x1: m.l, x2: m.l + iw, y1: Y(avg), y2: Y(avg),
+    if (avg > A.lo && avg < A.hi) {
+      svg.appendChild(mk("line", { x1: m.l, x2: m.l + iw, y1: A.y(avg), y2: A.y(avg),
         stroke: "var(--axis)", "stroke-width": 1 }));
     }
     card.querySelector(".legend .avgval").textContent = "기간 평균 " + fmt(avg, c.digits) + "%";
@@ -591,55 +654,76 @@ JS = r"""
       return s / n;
     });
 
-    /* 계열 (확정 구간 실선 / 잠정 구간 점선) */
+    /* 잠정(M2 미공표) 구간 시작 */
     var provIdx = null;
     if (c.provFrom != null) {
       var provDate = c.points[c.provFrom][0];
       for (var k = 0; k < pts.length; k++) { if (pts[k][0] >= provDate) { provIdx = k; break; } }
     }
     var cut = provIdx == null ? pts.length - 1 : Math.max(0, provIdx - 1);
-    function path(a, b, arr) {
+
+    function pathOf(idxs, valOf, sc) {
       var s = "";
-      for (var i = a; i <= b; i++) s += (i === a ? "M" : "L") + X(i).toFixed(1) + " " + Y(arr[i]).toFixed(1);
+      for (var k = 0; k < idxs.length; k++) {
+        var i = idxs[k];
+        s += (k === 0 ? "M" : "L") + X(i).toFixed(1) + " " + sc.y(valOf(i)).toFixed(1);
+      }
       return s;
     }
-    var area = mk("path", { d: path(0, pts.length - 1, vals) + "L" + X(pts.length - 1) + " " + (m.t + ih) + "L" + m.l + " " + (m.t + ih) + "Z",
-      fill: col, opacity: 0.06 });
-    svg.appendChild(area);
-    /* 원계열 — 옅게 */
-    svg.appendChild(mk("path", { d: path(0, pts.length - 1, vals), fill: "none", stroke: col,
-      "stroke-width": 1.25, opacity: 0.35, "stroke-linejoin": "round", "stroke-linecap": "round" }));
-    /* 이동평균 — 진하게 */
-    svg.appendChild(mk("path", { d: path(0, cut, ma), fill: "none", stroke: col, "stroke-width": 2,
-      "stroke-linejoin": "round", "stroke-linecap": "round" }));
-    if (provIdx != null && cut < pts.length - 1) {
-      svg.appendChild(mk("path", { d: path(cut, pts.length - 1, ma), fill: "none", stroke: col, "stroke-width": 2,
-        "stroke-dasharray": "4 3", "stroke-linecap": "round" }));
+    function span(a, b) { var r = []; for (var i = a; i <= b; i++) r.push(i); return r; }
+    function draw(d, stroke, width, opts) {
+      var at = { d: d, fill: "none", stroke: stroke, "stroke-width": width,
+                 "stroke-linejoin": "round", "stroke-linecap": "round" };
+      for (var k in (opts || {})) at[k] = opts[k];
+      svg.appendChild(mk("path", at));
     }
 
-    /* 끝점 직접 라벨 */
-    var lastX = X(pts.length - 1), lastY = Y(vals[vals.length - 1]);
-    svg.appendChild(mk("circle", { cx: lastX, cy: lastY, r: 4.5, fill: col, stroke: "var(--surface)", "stroke-width": 2 }));
-    var lbl = mk("text", { x: Math.min(lastX + 8, m.l + iw), y: Math.max(lastY - 10, m.t + 10),
-      "text-anchor": lastX > m.l + iw - 46 ? "end" : "start", fill: "var(--ink)",
-      "font-size": 12, "font-weight": 650 });
-    lbl.textContent = fmt(vals[vals.length - 1], c.digits) + "%";
-    svg.appendChild(lbl);
+    /* --- KOSPI 지수 (뒤에 깔린다) --- */
+    if (hasK) {
+      draw(pathOf(kIdx, function (i) { return pts[i][4]; }, B), colK, 1.75);
+      endLabel(B, kIdx[kIdx.length - 1], kvals[kvals.length - 1], 0, "", colK);
+    }
 
-    /* 호버 레이어 */
+    /* --- 비율 (앞에 온다) --- */
+    var all = span(0, pts.length - 1);
+    draw(pathOf(all, function (i) { return vals[i]; }, A), col, 1.25, { opacity: 0.3 });
+    draw(pathOf(span(0, cut), function (i) { return ma[i]; }, A), col, 2.25);
+    if (provIdx != null && cut < pts.length - 1) {
+      draw(pathOf(span(cut, pts.length - 1), function (i) { return ma[i]; }, A), col, 2.25,
+           { "stroke-dasharray": "4 3" });
+    }
+    endLabel(A, pts.length - 1, vals[vals.length - 1], c.digits, "%", col);
+
+    /* 겹친 선끼리 붙어 보이지 않게 끝점 표식에 배경색 링을 두른다 */
+    function endLabel(sc, i, v, digits, suffix, stroke) {
+      var x = X(i), y = sc.y(v);
+      svg.appendChild(mk("circle", { cx: x, cy: y, r: 4.5, fill: stroke,
+        stroke: "var(--surface)", "stroke-width": 2 }));
+      var lbl = mk("text", { x: x - 8, y: y - 9, "text-anchor": "end", fill: "var(--ink)",
+        "font-size": 12, "font-weight": 650 });
+      lbl.textContent = fmt(v, digits) + suffix;
+      svg.appendChild(lbl);
+    }
+
+    /* 호버 레이어 — 십자선 하나가 두 계열을 함께 가리킨다 */
     var cross = mk("line", { y1: m.t, y2: m.t + ih, stroke: "var(--axis)", "stroke-width": 1, opacity: 0 });
-    var dot = mk("circle", { r: 5, fill: col, stroke: "var(--surface)", "stroke-width": 2, opacity: 0 });
-    svg.appendChild(cross); svg.appendChild(dot);
-    var hit = mk("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" });
-    svg.appendChild(hit);
+    var dotA = mk("circle", { r: 5, fill: col, stroke: "var(--surface)", "stroke-width": 2, opacity: 0 });
+    var dotB = mk("circle", { r: 5, fill: colK, stroke: "var(--surface)", "stroke-width": 2, opacity: 0 });
+    svg.appendChild(cross); svg.appendChild(dotA); svg.appendChild(dotB);
+    svg.appendChild(mk("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" }));
 
     var cur = -1;
     function focus(i) {
       if (i < 0 || i >= pts.length) return;
       cur = i;
-      var p = pts[i], x = X(i), y = Y(p[1]);
+      var p = pts[i], x = X(i), y = A.y(p[1]);
       cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.setAttribute("opacity", 1);
-      dot.setAttribute("cx", x); dot.setAttribute("cy", y); dot.setAttribute("opacity", 1);
+      dotA.setAttribute("cx", x); dotA.setAttribute("cy", y); dotA.setAttribute("opacity", 1);
+      if (hasK && p[4] != null) {
+        dotB.setAttribute("cx", x); dotB.setAttribute("cy", B.y(p[4])); dotB.setAttribute("opacity", 1);
+      } else {
+        dotB.setAttribute("opacity", 0);
+      }
       var isProv = provIdx != null && i >= provIdx;
       tip.innerHTML =
         '<div class="tip-date">' + dateLabel(p[0]) + '</div>' +
@@ -647,14 +731,20 @@ JS = r"""
         '<div class="tip-rows">' +
           '<div><span>' + c.numLabel + '</span><span>' + fmt(p[2], p[2] < 100 ? 2 : 1) + '조</span></div>' +
           '<div><span>' + c.denLabel + '</span><span>' + fmt(p[3], 0) + '조</span></div>' +
+          '<div><span>KOSPI</span><span>' + (p[4] == null ? '–' : fmt(p[4], 2)) + '</span></div>' +
         '</div>' +
         (isProv ? '<div class="tip-flag">M2 미공표 구간 · 잠정</div>' : '');
       tip.classList.add("is-on");
-      var scale = wrap.clientWidth / W;
-      tip.style.left = Math.min(Math.max(x * scale, 70), wrap.clientWidth - 70) + "px";
-      tip.style.top = (y * scale - 12) + "px";
+      var sc = wrap.clientWidth / W;
+      tip.style.left = Math.min(Math.max(x * sc, 76), wrap.clientWidth - 76) + "px";
+      tip.style.top = (y * sc - 12) + "px";
     }
-    function blur() { cross.setAttribute("opacity", 0); dot.setAttribute("opacity", 0); tip.classList.remove("is-on"); }
+    function blur() {
+      cross.setAttribute("opacity", 0);
+      dotA.setAttribute("opacity", 0);
+      dotB.setAttribute("opacity", 0);
+      tip.classList.remove("is-on");
+    }
 
     function nearest(clientX) {
       var r = svg.getBoundingClientRect();

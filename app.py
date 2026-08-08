@@ -62,7 +62,9 @@ if warn:
         st.code(warn, language="text")
 
 head, body = build_site.render(data)
-components.html(head + body, height=2400, scrolling=True)
+# 내용 높이는 데스크톱에서 약 2,300px. 좁은 화면에서 글이 더 감기는 만큼 여유를 두고,
+# 넘칠 때는 잘리지 않게 iframe 안에서 스크롤되도록 한다.
+components.html(head + body, height=2600, scrolling=True)
 
 col1, col2 = st.columns([1, 4])
 with col1:

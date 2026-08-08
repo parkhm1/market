@@ -140,9 +140,14 @@ def _year_spans(start, end):
     return spans
 
 
-def freesis_series(s, obj_nm, start, end, value_col, extra=None, scale=MONEY_DIV):
-    """FreeSIS 일별 통계를 [(YYYYMMDD, 원), ...] 오름차순으로 반환."""
-    merged = {}
+def freesis_table(s, obj_nm, start, end, cols, extra=None):
+    """FreeSIS 일별 통계에서 여러 컬럼을 한 번에 받는다.
+
+    cols  : {컬럼명: 배율} — 금액 컬럼은 MONEY_DIV(억원 -> 원 환산), 지수/비율은 1.
+            (지수·비율 컬럼은 tmpV40 의 영향을 받지 않는다.)
+    return: {컬럼명: [(YYYYMMDD, 값), ...]} 오름차순
+    """
+    merged = {c: {} for c in cols}
     for c_start, c_end in _year_spans(start, end):
         dm = {
             "tmpV1": "D",                  # 자료주기 = 일
@@ -155,17 +160,28 @@ def freesis_series(s, obj_nm, start, end, value_col, extra=None, scale=MONEY_DIV
             dm.update(extra)
         payload = _freesis_post(s, dm, "%s~%s" % (c_start, c_end))
         for row in payload.get("ds1") or []:
-            d, v = row.get("TMPV1"), row.get(value_col)
-            if not d or v is None:
+            d = row.get("TMPV1")
+            if not d:
                 continue
-            merged[str(d)] = float(v) * scale
+            for col, scale in cols.items():
+                v = row.get(col)
+                if v is not None:
+                    merged[col][str(d)] = float(v) * scale
 
-    out = sorted(merged.items())
-    if not out:
-        raise RuntimeError("FreeSIS %s %s 결과가 비어 있습니다." % (obj_nm, value_col))
-    log("  FreeSIS %s %-9s %4d건  (%s ~ %s)"
-        % (obj_nm, value_col, len(out), out[0][0], out[-1][0]))
+    out = {}
+    for col in cols:
+        series = sorted(merged[col].items())
+        if not series:
+            raise RuntimeError("FreeSIS %s %s 결과가 비어 있습니다." % (obj_nm, col))
+        log("  FreeSIS %s %-9s %4d건  (%s ~ %s)"
+            % (obj_nm, col, len(series), series[0][0], series[-1][0]))
+        out[col] = series
     return out
+
+
+def freesis_series(s, obj_nm, start, end, value_col, extra=None):
+    """단일 금액 컬럼 편의 함수. [(YYYYMMDD, 원), ...]"""
+    return freesis_table(s, obj_nm, start, end, {value_col: MONEY_DIV}, extra)[value_col]
 
 
 # ------------------------------------------------------------------- ECOS
@@ -221,15 +237,19 @@ def collect():
     s = freesis_session()
     deposit = freesis_series(s, "STATSCU0100000060BO", s_ymd, e_ymd, "TMPV2")
     credit = freesis_series(s, "STATSCU0100000070BO", s_ymd, e_ymd, "TMPV2")
-    kospi = freesis_series(s, "STATSCU0100000020BO", s_ymd, e_ymd, "TMPV5",
-                           extra={"tmpV41": str(SHARE_DIV)})
+    # 유가증권시장 표에서 시가총액(TMPV5)과 KOSPI 지수(TMPV2)를 한 번에 받는다.
+    # 지수는 tmpV40 의 영향을 받지 않으므로 배율 1.
+    ks = freesis_table(s, "STATSCU0100000020BO", s_ymd, e_ymd,
+                       {"TMPV5": MONEY_DIV, "TMPV2": 1},
+                       extra={"tmpV41": str(SHARE_DIV)})
+    kospi, kospi_index = ks["TMPV5"], ks["TMPV2"]
     kosdaq = freesis_series(s, "STATSCU0100000030BO", s_ymd, e_ymd, "TMPV5",
                             extra={"tmpV41": str(SHARE_DIV)})
     m2 = ecos_m2(m2_start, m2_end)
 
     for name, series in [("투자자예탁금", deposit), ("신용거래융자", credit),
                          ("KOSPI 시가총액", kospi), ("KOSDAQ 시가총액", kosdaq),
-                         ("M2", m2)]:
+                         ("KOSPI 지수", kospi_index), ("M2", m2)]:
         if not series:
             raise RuntimeError("%s 자료가 비어 있습니다." % name)
 
@@ -242,12 +262,14 @@ def collect():
             "credit": credit,
             "mktcap_kospi": kospi,
             "mktcap_kosdaq": kosdaq,
+            "kospi_index": kospi_index,
         },
         "monthly": {"m2": m2},
         "sources": {
             "deposit": "금융투자협회 FreeSIS 증시자금추이 (투자자예탁금, 장내파생상품 거래예수금 제외)",
             "credit": "금융투자협회 FreeSIS 신용공여 잔고 추이 (신용거래융자 전체)",
             "mktcap": "금융투자협회 FreeSIS 유가증권시장·코스닥시장 시가총액",
+            "kospi_index": "금융투자협회 FreeSIS 유가증권시장 KOSPI지수 종가",
             "m2": "한국은행 ECOS 161Y008 M2(말잔, 원계열)",
         },
     }
