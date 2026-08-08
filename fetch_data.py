@@ -19,6 +19,7 @@
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import date, datetime, timedelta
@@ -33,6 +34,13 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 FREESIS_URL = "https://freesis.kofia.or.kr/meta/getMetaDataList.do"
 FREESIS_HOME = "https://freesis.kofia.or.kr/stat/main.do"
+
+# FreeSIS 는 금액을 tmpV40 으로 나눠서 돌려준다. 원 단위로 받으면 15~16자리 숫자가 되는데,
+# 해외 경로로 호출하면 11자리 이상 숫자열의 뒷부분이 '#' 로 마스킹돼 응답이 깨진다
+# (카드번호·주민번호로 오인한 개인정보 필터로 보임). 억원 단위로 받으면 최대 8자리라 안전하다.
+# 지표는 비율이라 억원 해상도로도 정밀도가 남는다 (상대오차 ~1e-7).
+MONEY_DIV = 100000000          # 억원
+SHARE_DIV = 1000               # 천주 (쓰지 않는 컬럼이지만 같이 짧게 받는다)
 
 def ecos_key():
     """ECOS 인증키: 환경변수 ECOS_API_KEY 가 있으면 사용, 없으면 공개 sample 키(1회 10건 제한).
@@ -94,11 +102,24 @@ def _freesis_post(s, dm, span):
                                 % (dm.get("OBJ_NM"), span, e))
         else:
             try:
-                return r.json()
+                return json.loads(_unmask(r.text))
             except ValueError as e:                  # HTML 오류 페이지, 잘린 응답 등
                 last = FreesisBadResponse(dm.get("OBJ_NM"), span, r, e)
         time.sleep(2 + 3 * attempt)
     raise last
+
+
+# 숫자 뒤에 붙은 '#' 마스킹을 0 으로 되살린다. 억원 단위로 받으므로 정상적으로는
+# 발동하지 않지만, 마스킹 임계값이 더 낮아지는 경우에도 페이지가 죽지 않게 두는 안전망이다.
+# (되살린 값의 상대오차는 마스킹된 자리수만큼 — 억원 단위에서는 무시할 수준)
+_MASK = re.compile(r"(?<=\d)#+")
+
+
+def _unmask(text):
+    fixed, n = _MASK.subn(lambda m: "0" * len(m.group()), text)
+    if n:
+        log("  주의: 마스킹된 숫자 %d개를 0으로 복원했습니다." % n)
+    return fixed
 
 
 def _year_spans(start, end):
@@ -113,15 +134,15 @@ def _year_spans(start, end):
     return spans
 
 
-def freesis_series(s, obj_nm, start, end, value_col, extra=None):
-    """FreeSIS 일별 통계를 [(YYYYMMDD, float), ...] 오름차순으로 반환."""
+def freesis_series(s, obj_nm, start, end, value_col, extra=None, scale=MONEY_DIV):
+    """FreeSIS 일별 통계를 [(YYYYMMDD, 원), ...] 오름차순으로 반환."""
     merged = {}
     for c_start, c_end in _year_spans(start, end):
         dm = {
-            "tmpV1": "D",            # 자료주기 = 일
-            "tmpV45": c_start,       # 조회 시작일
-            "tmpV46": c_end,         # 조회 종료일
-            "tmpV40": "1",           # 금액 단위 나눔값 (1 = 원)
+            "tmpV1": "D",                  # 자료주기 = 일
+            "tmpV45": c_start,             # 조회 시작일
+            "tmpV46": c_end,               # 조회 종료일
+            "tmpV40": str(MONEY_DIV),      # 금액 나눔값
             "OBJ_NM": obj_nm,
         }
         if extra:
@@ -131,7 +152,7 @@ def freesis_series(s, obj_nm, start, end, value_col, extra=None):
             d, v = row.get("TMPV1"), row.get(value_col)
             if not d or v is None:
                 continue
-            merged[str(d)] = float(v)
+            merged[str(d)] = float(v) * scale
 
     out = sorted(merged.items())
     if not out:
@@ -195,9 +216,9 @@ def collect():
     deposit = freesis_series(s, "STATSCU0100000060BO", s_ymd, e_ymd, "TMPV2")
     credit = freesis_series(s, "STATSCU0100000070BO", s_ymd, e_ymd, "TMPV2")
     kospi = freesis_series(s, "STATSCU0100000020BO", s_ymd, e_ymd, "TMPV5",
-                           extra={"tmpV41": "1"})
+                           extra={"tmpV41": str(SHARE_DIV)})
     kosdaq = freesis_series(s, "STATSCU0100000030BO", s_ymd, e_ymd, "TMPV5",
-                            extra={"tmpV41": "1"})
+                            extra={"tmpV41": str(SHARE_DIV)})
     m2 = ecos_m2(m2_start, m2_end)
 
     for name, series in [("투자자예탁금", deposit), ("신용거래융자", credit),
