@@ -185,6 +185,7 @@ def render(data):
     <span class="zoomchip" id="zoomChip" hidden></span>
   </div>
   <p class="hint">차트 위에서 <b>마우스 휠을 올리면 확대, 내리면 축소</b>됩니다(커서가 가리키는 날짜가 기준).
+    확대한 뒤에는 <b>좌우로 끌어</b> 구간을 옮길 수 있습니다(<b>Shift + 휠</b>도 됩니다).
     두 번 클릭하거나 <b>Esc</b>를 누르면 원래대로 돌아옵니다. 확대와 KOSPI 표시는 두 차트에 함께 적용됩니다.</p>
 
   <main class="stack" id="cards"></main>
@@ -388,8 +389,13 @@ body {
 .card.no-kospi .caveat, .card.no-kospi .k-item { display: none; }
 .card.is-table .legend { display: none; }
 
-.plotwrap { position: relative; margin-top: 8px; }
+.plotwrap { position: relative; margin-top: 8px; touch-action: pan-y; }
 .plotwrap svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+/* 확대 중일 때만 끌 수 있다 */
+.card.zoomed .plotwrap { cursor: grab; }
+/* .card.zoomed .plotwrap 보다 특이도가 높아야 커서가 바뀐다 */
+.card.zoomed .plotwrap.is-panning, .plotwrap.is-panning { cursor: grabbing; user-select: none; }
+.plotwrap.is-panning svg { pointer-events: none; }
 .plotwrap svg:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; border-radius: 6px; }
 
 .tip {
@@ -524,7 +530,46 @@ JS = r"""
       });
     });
     buildTable(c, el.querySelector(".tablewrap"));
+    setupPan(el);
   });
+
+  /* 확대 상태에서 좌우로 끌어 구간을 옮긴다.
+     핸들러는 .plotwrap 에 한 번만 붙인다 — 다시 그릴 때마다 svg 는 교체되므로
+     svg 에 붙이면 이동 중에 드래그가 끊긴다. */
+  function setupPan(card) {
+    var wrap = card.querySelector(".plotwrap");
+    var pan = null;
+    function svgUnitX(clientX) {
+      var g = card._geom, r = wrap.getBoundingClientRect();
+      return (clientX - r.left) / r.width * g.W;
+    }
+    wrap.addEventListener("pointerdown", function (e) {
+      if (!zoomWin || !card._geom) return;
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      var g = card._geom, x = svgUnitX(e.clientX);
+      if (x < g.ml || x > g.ml + g.iw) return;          /* 플롯 밖은 그냥 둔다 */
+      e.preventDefault();
+      var w = windowNow();
+      pan = { x: x, a: w.a, b: w.b };
+      wrap.classList.add("is-panning");
+      try { wrap.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    wrap.addEventListener("pointermove", function (e) {
+      if (!pan || !card._geom) return;
+      var g = card._geom;
+      /* 오른쪽으로 끌면 과거로 — 그림이 손을 따라온다 */
+      var days = (svgUnitX(e.clientX) - pan.x) / g.iw * (pan.b - pan.a);
+      shiftWindow(pan.a - days, pan.b - days);
+    });
+    function stop(e) {
+      if (!pan) return;
+      pan = null;
+      wrap.classList.remove("is-panning");
+      try { wrap.releasePointerCapture(e.pointerId); } catch (_) {}
+    }
+    wrap.addEventListener("pointerup", stop);
+    wrap.addEventListener("pointercancel", stop);
+  }
 
   /* ---------- 표 ---------- */
   function buildTable(c, host) {
@@ -615,7 +660,30 @@ JS = r"""
     drawAll();
   }
 
+  /* 확대 창을 같은 너비로 좌우로 민다. 바깥 한계에 닿으면 거기서 멈춘다. */
+  function shiftWindow(a, b) {
+    var base = baseWindow(), span = b - a;
+    if (a < base.a) { a = base.a; b = a + span; }
+    if (b > base.b) { b = base.b; a = b - span; }
+    zoomWin = { a: a, b: b };
+    renderZoomChip();
+    drawAllSoon();
+  }
+
+  /* 이동 중에는 프레임마다 한 번만 다시 그린다 */
+  var rafPending = false;
+  function drawAllSoon() {
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(function () { rafPending = false; drawAll(); });
+  }
+
   function renderZoomChip() {
+    /* 확대 중일 때만 손 모양 커서를 준다 — 끌 수 있다는 신호 */
+    charts.forEach(function (c) {
+      var el = document.getElementById("card-" + c.id);
+      if (el) el.classList.toggle("zoomed", !!zoomWin);
+    });
     var el = document.getElementById("zoomChip");
     if (!zoomWin) { el.hidden = true; el.textContent = ""; return; }
     el.hidden = false;
@@ -857,7 +925,10 @@ JS = r"""
       return best;
     }
 
-    svg.addEventListener("pointermove", function (e) { focus(indexAt(svgX(e.clientX))); });
+    svg.addEventListener("pointermove", function (e) {
+      if (wrap.classList.contains("is-panning")) return;   /* 끌고 있을 때는 십자선을 쉬게 둔다 */
+      focus(indexAt(svgX(e.clientX)));
+    });
     svg.addEventListener("pointerleave", blur);
     svg.addEventListener("dblclick", clearZoom);
 
@@ -866,6 +937,18 @@ JS = r"""
     svg.addEventListener("wheel", function (e) {
       if (!e.deltaY) return;
       var base = baseWindow(), cur = windowNow();
+
+      /* Shift + 휠 = 좌우 이동 */
+      if (e.shiftKey && zoomWin) {
+        var sp = cur.b - cur.a, step = sp * 0.08 * (e.deltaY > 0 ? 1 : -1);
+        if (step > 0 && cur.b >= base.b - 0.5) return;
+        if (step < 0 && cur.a <= base.a + 0.5) return;
+        e.preventDefault();
+        blur();
+        shiftWindow(cur.a + step, cur.b + step);
+        return;
+      }
+
       var spanNow = cur.b - cur.a;
       var maxSpan = base.b - base.a;
       var want = spanNow * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP);
@@ -907,6 +990,9 @@ JS = r"""
       var a = Math.max(base.a, Math.min(base.b - span, mid - span / 2));
       setWindow(a, a + span);
     }
+
+    /* 이동 핸들러가 현재 플롯 영역을 알 수 있게 남겨둔다 */
+    card._geom = { W: W, ml: m.l, iw: iw };
 
     wrap.insertBefore(svg, tip);
   }
