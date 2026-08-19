@@ -1,0 +1,11 @@
+# DART 고유번호 캐시 (dart.py 가 자동 생성, 10MB 가량)
+corp_codes.json
+
+# 인증키 — 절대 커밋하지 않는다
+.env
+.streamlit/secrets.toml
+
+__pycache__/
+*.pyc
+index.html
+artifact.html

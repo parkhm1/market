@@ -10,7 +10,40 @@
 - `fetch_data.py` — 금융투자협회 FreeSIS(일별) + 한국은행 ECOS(월별) 수집
 - `build_site.py` — 지표 계산 및 화면 생성
 - `app.py` — Streamlit 엔트리 포인트
+- `dart.py` — 전자공시(DART) OpenAPI 조회. 수주잔고·재무·공시목록
 - `data.json` — 원자료 캐시 (커밋해 둠)
+
+## 인증키
+
+키는 **환경변수로만** 다룬다. 이 저장소는 공개 저장소이므로 키를 파일에 적어 커밋하지 않는다.
+
+| 변수 | 용도 | 발급 |
+|---|---|---|
+| `DART_API_KEY` | 전자공시 OpenDART (`dart.py`) | https://opendart.fss.or.kr — 일 20,000건 |
+| `ECOS_API_KEY` | 한국은행 ECOS (`fetch_data.py`) | 없으면 공개 `sample` 키로 동작 |
+
+넣는 곳은 셋 중 하나다.
+
+1. **Claude Code 웹 환경 설정 → 환경변수** — 이걸 넣어 두면 앞으로 모든 세션에서 바로 쓸 수 있다. 권장.
+2. 로컬 셸: `export DART_API_KEY=...` 또는 `.env` 복사 후 `set -a; source .env; set +a`
+3. Streamlit Cloud: 앱 **Settings → Secrets**
+
+세션에서 키가 없으면 `dart.py` 가 발급 안내를 띄우고 멈춘다. 사용자에게 키를 물어보기 전에
+`echo $DART_API_KEY` 로 이미 들어와 있는지부터 확인할 것.
+
+## 전자공시 조회
+
+`dart.py` 로 사업보고서·반기보고서·분기보고서를 읽는다.
+
+```bash
+python dart.py 프로텍                # 최근 2년 정기보고서 목록
+python dart.py 프로텍 --order        # 수주상황 표 (수주총액·기납품액·수주잔고)
+python dart.py 053610 --order        # 종목코드로도 된다
+python dart.py 프로텍 --fin 2026 --rpt 반기
+python dart.py --order 프로텍 티에스이 기가비스 티엘비    # 여러 개 비교
+```
+
+수주잔고는 **의무 공시 항목이 아니다.** 표가 없는 회사가 있고, 그 경우 그렇게 표시된다.
 
 ## 투자 관련 대화
 

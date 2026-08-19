@@ -55,6 +55,7 @@
 | `app.py` | Streamlit 엔트리 포인트. 접속 시 수집 → 같은 화면을 iframe 으로 렌더 |
 | `fetch_data.py` | 금융투자협회 FreeSIS(일별) + 한국은행 ECOS(월별) 수집. `collect()` 는 dict 반환, 단독 실행하면 `data.json` 저장 |
 | `build_site.py` | 지표 계산 + 화면 생성. `render(data)` → (head, body). 단독 실행하면 `index.html` / `artifact.html` 저장 |
+| `dart.py` | 전자공시(DART) 조회. 수주잔고·재무·공시목록. `DART_API_KEY` 필요 |
 | `data.json` | 원자료 캐시. 커밋해 두므로 수집이 실패해도 직전 자료로 화면이 뜬다 |
 | `update.ps1` | 윈도우에서 수동 갱신 (`index.html` 재생성) |
 | `.github/workflows/update.yml` | 방법 B 용 워크플로 |
@@ -64,6 +65,18 @@
 ```bash
 python -m streamlit run app.py
 ```
+
+## 전자공시 조회
+
+```bash
+export DART_API_KEY=발급받은키          # https://opendart.fss.or.kr
+python dart.py 프로텍 --order           # 수주상황 (수주총액·기납품액·수주잔고)
+python dart.py 프로텍                   # 최근 2년 정기보고서 목록
+python dart.py 프로텍 --fin 2026 --rpt 반기
+```
+
+인증키는 **환경변수로만** 넣는다. 이 저장소는 공개 저장소라 키를 파일에 적어 커밋하면 그대로 노출된다.
+`.env.example` 을 `.env` 로 복사해 쓰는 방법도 있다 (`.env` 는 `.gitignore` 에 있다).
 
 ## 알아둘 것
 
